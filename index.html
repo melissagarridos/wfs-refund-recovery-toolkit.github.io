@@ -574,6 +574,18 @@
             color: var(--accent);
         }
 
+        .send-status {
+            display: none;
+            font-size: 12px;
+            font-weight: 500;
+            padding: 9px 12px;
+            border-radius: 7px;
+            margin-top: 10px;
+        }
+        .send-status.visible { display: block; }
+        .send-status.success { background: rgba(56,217,169,0.1); border: 1px solid rgba(56,217,169,0.25); color: var(--accent2); }
+        .send-status.error   { background: rgba(255,107,107,0.1); border: 1px solid rgba(255,107,107,0.25); color: var(--danger); }
+
         .toast {
             position: fixed;
             bottom: 24px;
@@ -731,9 +743,10 @@
                     <textarea class="pr-textarea" id="prGtins" placeholder="00810031545896&#10;00810031546404&#10;00199061003195" oninput="updatePreview()"></textarea>
                     <p class="hint">One GTIN per line or separated by commas.</p>
 
-                    <button class="btn" style="width:100%;margin-top:4px;" onclick="openMailto()">
-                        ✉ Open in Email Client
+                    <button class="btn" style="width:100%;margin-top:4px;" onclick="sendEmail()" id="prSendBtn">
+                        ✉ Send Email
                     </button>
+                    <div class="send-status" id="prSendStatus"></div>
                     <button class="btn btn-secondary" style="width:100%;margin-top:10px;" onclick="copyEmail()">
                         Copy Email Body
                     </button>
@@ -1138,11 +1151,39 @@ function updatePreview() {
     }
 }
 
-function openMailto() {
+async function sendEmail() {
+    const url = 'https://script.google.com/macros/s/AKfycbxD4Xu6grZWOg0nhRUYkbULupRqpGk2JbslUhYiIq0vV9P8uhgB3BAd-aaUOHklnfZ5/exec';
+    const statusEl = document.getElementById('prSendStatus');
+
     const { body } = getEmailParts();
-    const subject = encodeURIComponent('WFS Fee Dispute – Photo Request');
-    const bodyEnc = encodeURIComponent(body);
-    window.location.href = `mailto:melissa@sellcord.co?from=melissa@refundstacker.com&subject=${subject}&body=${bodyEnc}`;
+    const btn = document.getElementById('prSendBtn');
+    btn.disabled = true;
+    btn.textContent = 'Sending…';
+    statusEl.className = 'send-status';
+
+    try {
+        const res = await fetch(url, {
+            method: 'POST',
+            mode: 'no-cors',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                to: 'melissa@sellcord.co',
+                subject: 'WFS Fee Dispute – Photo Request',
+                body
+            })
+        });
+
+        // no-cors means we can't read the response, but if it didn't throw, it went through
+        statusEl.className = 'send-status success visible';
+        statusEl.textContent = '✅ Email sent to melissa@sellcord.co';
+        showToast('Email sent!');
+    } catch (err) {
+        statusEl.className = 'send-status error visible';
+        statusEl.textContent = '❌ Failed to send: ' + err.message;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '✉ Send Email';
+    }
 }
 
 function copyEmail() {
@@ -1152,7 +1193,7 @@ function copyEmail() {
 }
 
 window.updatePreview = updatePreview;
-window.openMailto = openMailto;
+window.sendEmail = sendEmail;
 window.copyEmail = copyEmail;
 
 // Init preview on load

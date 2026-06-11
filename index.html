@@ -457,27 +457,6 @@
         .stat-chip .stat-val { font-size: 22px; font-weight: 700; color: var(--accent); }
         .stat-chip .stat-lbl { font-size: 11px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.8px; }
 
-        /* delimiter option */
-        .delimiter-row {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            margin-bottom: 16px;
-            flex-wrap: wrap;
-        }
-        .delimiter-row label { font-size: 12px; color: var(--text2); font-weight: 500; }
-        .delimiter-row select {
-            background: var(--surface2);
-            border: 1px solid var(--border);
-            border-radius: 6px;
-            color: var(--text);
-            font-size: 12px;
-            padding: 6px 10px;
-            outline: none;
-            cursor: pointer;
-        }
-        .delimiter-row select:focus { border-color: var(--accent); }
-
         .toast {
             position: fixed;
             bottom: 24px;
@@ -581,30 +560,11 @@
                     <span class="format-pill pill-xlsx">XLSX Excel</span>
                 </div>
 
-                <!-- Delimiter selector (shown before file load too) -->
-                <div class="delimiter-row">
-                    <label for="delimSelect">Delimiter:</label>
-                    <select id="delimSelect">
-                        <option value="auto">Auto-detect</option>
-                        <option value=",">Comma (,)</option>
-                        <option value="	">Tab (\t)</option>
-                        <option value=";">Semicolon (;)</option>
-                        <option value="|">Pipe (|)</option>
-                    </select>
-                    <label style="margin-left:8px;" for="skipRowsInput">Skip header rows:</label>
-                    <select id="skipRowsInput">
-                        <option value="0">0 (standard CSV)</option>
-                        <option value="3" selected>3 (Walmart settlement)</option>
-                        <option value="1">1</option>
-                        <option value="2">2</option>
-                    </select>
-                </div>
-
                 <div class="drop-zone" id="convDropZone">
                     <input type="file" id="convFileInput" accept=".csv,.tsv,.txt" onchange="loadConvFile(this)">
                     <div class="dz-icon">📄</div>
                     <p><strong>Upload CSV, TSV or TXT file</strong></p>
-                    <p class="dz-hint">Generates a downloadable Excel file — nothing leaves your browser</p>
+                    <p class="dz-hint">Parsed and converted entirely in your browser — no data leaves your device</p>
                 </div>
 
                 <div class="file-chosen" id="convFileChosen">
@@ -622,6 +582,7 @@
                     <div class="preview-table-wrap">
                         <table class="preview-table" id="previewTable"></table>
                     </div>
+                    <p class="hint" id="previewNotice" style="margin-top:8px;display:none;"></p>
                     <div style="margin-top:18px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
                         <button class="btn btn-success" onclick="convertToExcel()">⬇ Download as Excel</button>
                         <button class="btn btn-secondary" onclick="resetConverter()">Upload another file</button>
@@ -870,8 +831,15 @@ window.processFile        = processFile;
 window.exportRefundsToExcel = exportRefundsToExcel;
 window.applyFilter        = applyFilter;
 
-// ── CSV → EXCEL CONVERTER (fixed) ────────────────────────────────────────────
-let convData     = null;
+// ── CSV → EXCEL CONVERTER (pure SheetJS) ─────────────────────────────────────
+// SheetJS reads the CSV directly: it handles ="" quoting natively so values
+// like ="00810031545896" come out as the plain string 00810031545896 with no
+// manual stripping required.
+
+let convWb       = null;   // the SheetJS workbook we'll write out
+let convWs       = null;   // the single worksheet
+let convRows     = 0;
+let convCols     = [];
 let convFileName = '';
 
 async function loadConvFile(input) {
@@ -883,83 +851,99 @@ async function loadConvFile(input) {
     document.getElementById('convFileChosen').classList.add('visible');
     document.getElementById('convErrorBox').classList.remove('visible');
     document.getElementById('convPreviewWrap').style.display = 'none';
-
-    const convStatus = document.getElementById('convStatus');
-    convStatus.className = 'conv-status';
+    document.getElementById('convStatus').className = 'conv-status';
 
     try {
-        const text = await file.text();
+        const buf = await file.arrayBuffer();
 
-        // Determine delimiter
-        const delimVal  = document.getElementById('delimSelect').value;
-        const skipRows  = parseInt(document.getElementById('skipRowsInput').value, 10) || 0;
+        // XLSX.read with type:'array' parses CSV/TSV using SheetJS's own parser.
+        // dense:false keeps the sparse sheet model; raw:false means ="" cells
+        // are decoded to their text value automatically.
+        const wb = XLSX.read(buf, {
+            type: 'array',
+            raw: false,       // decode ="..." formula-strings to plain text
+            dense: false,
+        });
 
-        const lines = text.split(/\r?\n/);
-        const usableContent = skipRows > 0 ? lines.slice(skipRows).join('\n') : text;
+        const wsName = wb.SheetNames[0];
+        const ws     = wb.Sheets[wsName];
 
-        // Auto-detect delimiter from first data line if needed
-        let delimiter = delimVal;
-        if (delimVal === 'auto') {
-            const sampleLine = usableContent.split(/\r?\n/).find(l => l.trim().length > 0) || '';
-            const counts = {
-                ',': (sampleLine.match(/,/g) || []).length,
-                '\t': (sampleLine.match(/\t/g) || []).length,
-                ';': (sampleLine.match(/;/g) || []).length,
-                '|': (sampleLine.match(/\|/g) || []).length,
-            };
-            delimiter = Object.entries(counts).sort((a, b) => b[1] - a[1])[0][0];
+        if (!ws) throw new Error('No sheet found in the file.');
+
+        // sheet_to_json with header:1 gives us a 2-D array (row 0 = headers)
+        const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
+
+        if (aoa.length < 2) throw new Error('File appears to be empty or has only a header row.');
+
+        // Detect Walmart settlement files: first row is a company name (single cell),
+        // real header is on row 3 (index 3). Otherwise header is row 0.
+        let headerIdx = 0;
+        if (
+            aoa[0].filter(c => String(c).trim() !== '').length <= 2 &&
+            aoa.length > 3
+        ) {
+            // Try to find a row that looks like a proper header (several non-empty cells)
+            for (let i = 1; i < Math.min(6, aoa.length); i++) {
+                if (aoa[i].filter(c => String(c).trim() !== '').length > 3) {
+                    headerIdx = i;
+                    break;
+                }
+            }
         }
 
-        Papa.parse(usableContent, {
-            header: true,
-            skipEmptyLines: true,
-            delimiter: delimiter,
-            complete(results) {
-                if (!results.data.length || !results.meta.fields || !results.meta.fields.length) {
-                    const errBox = document.getElementById('convErrorBox');
-                    errBox.textContent = 'No data found. Try adjusting the delimiter or the number of header rows to skip.';
-                    errBox.classList.add('visible');
-                    return;
-                }
-                // Strip ="" Excel-escape artifacts from every cell
-                results.data = results.data.map(row => {
-                    const clean = {};
-                    for (const key of results.meta.fields) {
-                        clean[key] = stripExcel(row[key]);
-                    }
-                    return clean;
-                });
-                convData = results;
-                renderConvPreview(results);
-            },
-            error(err) {
-                const errBox = document.getElementById('convErrorBox');
-                errBox.textContent = 'Parse error: ' + err.message;
-                errBox.classList.add('visible');
-            },
+        const headers  = aoa[headerIdx].map(h => String(h).trim());
+        const dataRows = aoa.slice(headerIdx + 1).filter(r =>
+            r.some(c => String(c).trim() !== '')  // skip blank rows
+        );
+
+        if (!headers.length) throw new Error('Could not detect column headers.');
+
+        // Rebuild a clean workbook from the parsed data so the output
+        // is a proper Excel file with no CSV artifacts.
+        const cleanAoa = [headers, ...dataRows];
+        const outWs    = XLSX.utils.aoa_to_sheet(cleanAoa);
+
+        // Auto column widths (sample up to 300 rows)
+        const sample = cleanAoa.slice(0, 300);
+        outWs['!cols'] = headers.map((h, ci) => {
+            const maxLen = Math.max(
+                h.length,
+                ...sample.map(r => String(r[ci] || '').length)
+            );
+            return { wch: Math.min(maxLen + 2, 60) };
         });
+
+        // Store for export
+        convWb   = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(convWb, outWs, 'Data');
+        convWs   = outWs;
+        convRows = dataRows.length;
+        convCols = headers;
+
+        renderConvPreview(headers, dataRows);
+
     } catch (err) {
         const errBox = document.getElementById('convErrorBox');
         errBox.textContent = 'Could not read file: ' + err.message;
         errBox.classList.add('visible');
+        // reset state
+        convWb = null; convWs = null;
     }
 }
 
-function renderConvPreview(results) {
+function renderConvPreview(headers, dataRows) {
     const wrap  = document.getElementById('convPreviewWrap');
     const stats = document.getElementById('convStats');
     const tbl   = document.getElementById('previewTable');
-
-    const rows = results.data;
-    const cols = results.meta.fields || [];
+    const notice = document.getElementById('previewNotice');
 
     stats.innerHTML = `
         <div class="stat-chip">
-            <div class="stat-val">${rows.length.toLocaleString()}</div>
+            <div class="stat-val">${dataRows.length.toLocaleString()}</div>
             <div class="stat-lbl">Rows</div>
         </div>
         <div class="stat-chip">
-            <div class="stat-val">${cols.length}</div>
+            <div class="stat-val">${headers.length}</div>
             <div class="stat-lbl">Columns</div>
         </div>
         <div class="stat-chip">
@@ -967,68 +951,46 @@ function renderConvPreview(results) {
             <div class="stat-lbl">Source</div>
         </div>`;
 
-    const preview = rows.slice(0, 100);
+    const preview = dataRows.slice(0, 100);
     let html = '<thead><tr>' +
-        cols.map(c => `<th title="${c.replace(/"/g,'')}">${c}</th>`).join('') +
+        headers.map(h => `<th title="${h.replace(/"/g, '')}">${h}</th>`).join('') +
         '</tr></thead><tbody>';
-    preview.forEach(r => {
+    preview.forEach(row => {
         html += '<tr>' +
-            cols.map(c => {
-                const v = String(r[c] || '');
-                return `<td title="${v.replace(/"/g,'')}">${v}</td>`;
+            headers.map((_, ci) => {
+                const v = String(row[ci] != null ? row[ci] : '');
+                return `<td title="${v.replace(/"/g, '')}">${v}</td>`;
             }).join('') +
             '</tr>';
     });
     html += '</tbody>';
     tbl.innerHTML = html;
 
-    if (rows.length > 100) {
-        // small notice under table
-        const notice = wrap.querySelector('.preview-notice');
-        if (!notice) {
-            const n = document.createElement('p');
-            n.className = 'preview-notice hint';
-            n.style.marginTop = '8px';
-            n.textContent = `Showing first 100 of ${rows.length.toLocaleString()} rows. All rows will be included in the exported Excel file.`;
-            wrap.querySelector('.panel').insertBefore(n, wrap.querySelector('.panel').children[2]);
-        }
+    if (dataRows.length > 100) {
+        notice.textContent = `Showing first 100 of ${dataRows.length.toLocaleString()} rows. All rows will be included in the exported Excel file.`;
+        notice.style.display = 'block';
+    } else {
+        notice.style.display = 'none';
     }
 
     wrap.style.display = 'block';
 }
 
 function convertToExcel() {
-    if (!convData) return;
-
-    const rows = convData.data;
-    const cols = convData.meta.fields || [];
-
-    const ws = XLSX.utils.json_to_sheet(rows, { header: cols });
-
-    // Auto column widths (sample up to 200 rows for speed)
-    const sample = rows.slice(0, 200);
-    ws['!cols'] = cols.map(col => {
-        const maxLen = Math.max(
-            col.length,
-            ...sample.map(r => String(r[col] || '').length)
-        );
-        return { wch: Math.min(maxLen + 2, 50) };
-    });
-
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Data');
+    if (!convWb) return;
 
     const baseName = convFileName.replace(/\.[^.]+$/, '') || 'converted';
-    XLSX.writeFile(wb, baseName + '.xlsx');
+    XLSX.writeFile(convWb, baseName + '.xlsx');
 
     const status = document.getElementById('convStatus');
     status.className = 'conv-status success visible';
-    status.innerHTML = `✅ <strong>${baseName}.xlsx</strong> downloaded — ${rows.length.toLocaleString()} rows exported.`;
+    status.innerHTML = `✅ <strong>${baseName}.xlsx</strong> downloaded — ${convRows.toLocaleString()} rows exported.`;
     showToast('Excel ready — check your downloads');
 }
 
 function resetConverter() {
-    convData = null;
+    convWb = null; convWs = null;
+    convRows = 0; convCols = [];
     convFileName = '';
     document.getElementById('convFileInput').value = '';
     document.getElementById('convFileChosen').classList.remove('visible');
@@ -1037,9 +999,9 @@ function resetConverter() {
     document.getElementById('convStatus').className = 'conv-status';
 }
 
-window.loadConvFile    = loadConvFile;
-window.convertToExcel  = convertToExcel;
-window.resetConverter  = resetConverter;
+window.loadConvFile   = loadConvFile;
+window.convertToExcel = convertToExcel;
+window.resetConverter = resetConverter;
 </script>
 </body>
 </html>

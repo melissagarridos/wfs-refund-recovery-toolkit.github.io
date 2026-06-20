@@ -8,15 +8,6 @@ A lightweight operations tool designed to help eCommerce account managers, reimb
 
 <br>
 
-
-<br>
-
-<a href="https://melissagarridos.github.io/">Portfolio</a> •
-<a href="https://www.linkedin.com/in/melissavgs/">LinkedIn</a> •
-<a href="https://github.com/melissagarridos">GitHub</a>
-
-<br><br>
-
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES6-yellow?style=for-the-badge)
 ![Excel](https://img.shields.io/badge/Excel-Processing-green?style=for-the-badge)
 ![CSV](https://img.shields.io/badge/CSV-Parser-blue?style=for-the-badge)

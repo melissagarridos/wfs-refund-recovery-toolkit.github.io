@@ -8,7 +8,6 @@ A lightweight operations tool designed to help eCommerce account managers, reimb
 
 <br>
 
-<img src="assets/hero-dashboard.png" alt="WFS Settlement Tools" width="100%"/>
 
 <br>
 
